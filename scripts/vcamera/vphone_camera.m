@@ -300,7 +300,8 @@ static id hook_deviceInputWithDevice(id self, SEL _cmd, id device, NSError **err
     if ([device isKindOfClass:g_FakeDeviceClass]) {
         VCAM_LOG(@"+deviceInputWithDevice: accepting fake device");
         if (error) *error = nil;
-        return [[NSObject alloc] init];
+        // Alloc a real AVCaptureDeviceInput but skip init — typed correctly for downstream use
+        return [AVCaptureDeviceInput alloc];
     }
     return ((id(*)(id, SEL, id, NSError**))orig_deviceInputWithDevice)(self, _cmd, device, error);
 }
@@ -311,7 +312,9 @@ static id hook_initWithDevice(id self, SEL _cmd, id device, NSError **error) {
     if ([device isKindOfClass:g_FakeDeviceClass]) {
         VCAM_LOG(@"-initWithDevice: accepting fake device");
         if (error) *error = nil;
-        return [[NSObject alloc] init];
+        // Return self (allocated but uninitialized) — it IS an AVCaptureDeviceInput
+        // so it responds to the right selectors with nil/zero defaults
+        return self;
     }
     return ((id(*)(id, SEL, id, NSError**))orig_initWithDevice)(self, _cmd, device, error);
 }
@@ -320,11 +323,15 @@ static id hook_initWithDevice(id self, SEL _cmd, id device, NSError **error) {
 
 static IMP orig_addInput = NULL;
 static void hook_addInput(id self, SEL _cmd, id input) {
-    if (![input isKindOfClass:[AVCaptureInput class]]) {
-        VCAM_LOG(@"addInput: accepting fake input (skipping real addInput)");
-        return;
-    }
-    ((void(*)(id, SEL, id))orig_addInput)(self, _cmd, input);
+    // Always no-op — no real camera hardware, calling original would fail on mediaserverd
+    VCAM_LOG(@"addInput: intercepted (no-op)");
+}
+
+// Also hook canAddInput: to always return YES
+static IMP orig_canAddInput = NULL;
+static BOOL hook_canAddInput(id self, SEL _cmd, id input) {
+    VCAM_LOG(@"canAddInput: -> YES");
+    return YES;
 }
 
 #pragma mark - Hook 7 & 8: AVCaptureSession -startRunning / -stopRunning
@@ -520,12 +527,16 @@ static void VPhoneCameraInit(void) {
                           (IMP)hook_initWithDevice,
                           &orig_initWithDevice);
 
-    // Hook 6: AVCaptureSession -addInput:
+    // Hook 6: AVCaptureSession -addInput: / -canAddInput:
     Class sessionClass = [AVCaptureSession class];
     SwizzleInstanceMethod(sessionClass,
                           @selector(addInput:),
                           (IMP)hook_addInput,
                           &orig_addInput);
+    SwizzleInstanceMethod(sessionClass,
+                          @selector(canAddInput:),
+                          (IMP)hook_canAddInput,
+                          &orig_canAddInput);
 
     // Hook 7: AVCaptureSession -startRunning
     SwizzleInstanceMethod(sessionClass,
