@@ -281,12 +281,22 @@ fi
 echo ""
 echo "[JB-4.5] Deploying virtual camera hook..."
 
-# Build vcamera dylib
+# Build vcamera dylib + TweakLoader
 make -C "$SCRIPT_DIR/vcamera" clean all
-cp "$SCRIPT_DIR/vcamera/vphone_camera.dylib" "$TEMP_DIR/vphone_camera.dylib"
-ldid_sign "$TEMP_DIR/vphone_camera.dylib"
 
-# Deploy dylib + filter plist
+# Sign both dylibs
+cp "$SCRIPT_DIR/vcamera/vphone_camera.dylib" "$TEMP_DIR/vphone_camera.dylib"
+cp "$SCRIPT_DIR/vcamera/TweakLoader.dylib" "$TEMP_DIR/TweakLoader.dylib"
+ldid_sign "$TEMP_DIR/vphone_camera.dylib"
+ldid_sign "$TEMP_DIR/TweakLoader.dylib"
+
+# Deploy TweakLoader (systemhook loads this to scan MobileSubstrate tweaks)
+ssh_cmd "/bin/mkdir -p /mnt1/var/jb/usr/lib"
+scp_to "$TEMP_DIR/TweakLoader.dylib" "/mnt1/var/jb/usr/lib/TweakLoader.dylib"
+ssh_cmd "/bin/chmod 0755 /mnt1/var/jb/usr/lib/TweakLoader.dylib"
+echo "  [+] TweakLoader.dylib -> /var/jb/usr/lib/"
+
+# Deploy vcamera dylib + filter plist
 ssh_cmd "/bin/mkdir -p /mnt1/Library/MobileSubstrate/DynamicLibraries"
 scp_to "$TEMP_DIR/vphone_camera.dylib" "/mnt1/Library/MobileSubstrate/DynamicLibraries/vphone_camera.dylib"
 scp_to "$SCRIPT_DIR/vcamera/vphone_camera.plist" "/mnt1/Library/MobileSubstrate/DynamicLibraries/vphone_camera.plist"
