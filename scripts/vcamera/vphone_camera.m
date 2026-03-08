@@ -2,7 +2,7 @@
 //
 // MobileSubstrate tweak dylib that hooks UIImagePickerController and
 // AVCaptureSession APIs to provide a fake camera source from a static
-// image. Loaded automatically by systemhook into all UIKit processes.
+// image. Loaded automatically by TweakLoader into all UIKit processes.
 //
 // Image source: /var/mobile/Media/vphone/camera_feed.jpg
 // Falls back to a 1920x1080 grey placeholder when absent.
@@ -19,7 +19,28 @@
 
 #pragma mark - Logging
 
-#define VCAM_LOG(fmt, ...) NSLog(@"[vphone_camera] " fmt, ##__VA_ARGS__)
+static NSString *const kVCamLogPath = @"/var/mobile/Library/Logs/vphone_camera.log";
+
+static void VCamLog(NSString *fmt, ...) NS_FORMAT_FUNCTION(1,2) {
+    va_list args;
+    va_start(args, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:args];
+    va_end(args);
+
+    NSString *line = [NSString stringWithFormat:@"[vphone_camera][%@] %@\n",
+        [[NSProcessInfo processInfo] processName], msg];
+
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:kVCamLogPath];
+    if (fh) {
+        [fh seekToEndOfFile];
+        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+    } else {
+        [line writeToFile:kVCamLogPath atomically:NO encoding:NSUTF8StringEncoding error:nil];
+    }
+}
+
+#define VCAM_LOG(fmt, ...) VCamLog(fmt, ##__VA_ARGS__)
 
 #pragma mark - Configuration
 
@@ -33,6 +54,7 @@ static const double kFrameRate = 30.0;
 static CVPixelBufferRef g_pixelBuffer = NULL;
 static dispatch_source_t g_frameTimer = NULL;
 static BOOL g_sessionRunning = NO;
+static BOOL g_initialized = NO;
 
 // Fake device class registered at load time
 static Class g_FakeDeviceClass = Nil;
@@ -66,19 +88,19 @@ static CVPixelBufferRef CreatePixelBufferFromImage(CGImageRef image, int width, 
 
         // Draw label text using CoreText
         CFStringRef text = CFSTR("vphone virtual camera");
-        CFMutableDictionaryRef attrs = CFDictionaryCreateMutable(NULL, 2,
+        CFMutableDictionaryRef textAttrs = CFDictionaryCreateMutable(NULL, 2,
             &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
         CTFontRef font = CTFontCreateWithName(CFSTR("Helvetica"), 36, NULL);
         CGColorRef textColor = CGColorCreate(cs, (CGFloat[]){0.8, 0.8, 0.8, 1.0});
-        CFDictionarySetValue(attrs, kCTFontAttributeName, font);
-        CFDictionarySetValue(attrs, kCTForegroundColorAttributeName, textColor);
-        CFAttributedStringRef attrStr = CFAttributedStringCreate(NULL, text, attrs);
+        CFDictionarySetValue(textAttrs, kCTFontAttributeName, font);
+        CFDictionarySetValue(textAttrs, kCTForegroundColorAttributeName, textColor);
+        CFAttributedStringRef attrStr = CFAttributedStringCreate(NULL, text, textAttrs);
         CTLineRef line = CTLineCreateWithAttributedString(attrStr);
         CGContextSetTextPosition(ctx, width / 2 - 200, height / 2);
         CTLineDraw(line, ctx);
         CFRelease(line);
         CFRelease(attrStr);
-        CFRelease(attrs);
+        CFRelease(textAttrs);
         CGColorRelease(textColor);
         CFRelease(font);
     }
@@ -101,9 +123,9 @@ static void EnsurePixelBuffer(void) {
         }
         if (source) CFRelease(source);
         CGDataProviderRelease(provider);
-        VCAM_LOG("loaded camera feed from %@", kCameraFeedPath);
+        VCAM_LOG(@"loaded camera feed from %@", kCameraFeedPath);
     } else {
-        VCAM_LOG("no camera feed at %@, using placeholder", kCameraFeedPath);
+        VCAM_LOG(@"no camera feed at %@, using placeholder", kCameraFeedPath);
     }
 
     g_pixelBuffer = CreatePixelBufferFromImage(image, kFrameWidth, kFrameHeight);
@@ -132,37 +154,65 @@ static CMSampleBufferRef CreateSampleBufferFromPixelBuffer(CVPixelBufferRef pixe
 
 #pragma mark - Fake AVCaptureDevice
 
-// Property storage keys (associated objects)
-static const void *kFakeDeviceUniqueIDKey   = &kFakeDeviceUniqueIDKey;
-static const void *kFakeDeviceModelIDKey    = &kFakeDeviceModelIDKey;
-static const void *kFakeDeviceNameKey       = &kFakeDeviceNameKey;
-static const void *kFakeDevicePositionKey   = &kFakeDevicePositionKey;
+// Return nil for properties we don't fully support — prevents unrecognized selector crashes
+static id fake_nil(id self, SEL _cmd) { return nil; }
+static BOOL fake_YES(id self, SEL _cmd) { return YES; }
+static BOOL fake_NO(id self, SEL _cmd) { return NO; }
+static NSInteger fake_zero(id self, SEL _cmd) { return 0; }
+static void fake_noop(id self, SEL _cmd) { }
+static void fake_noop1(id self, SEL _cmd, id a) { }
 
-static NSString *fake_uniqueID(id self, SEL _cmd)       { return @"com.vphone.vcamera"; }
-static NSString *fake_modelID(id self, SEL _cmd)        { return @"VPhoneVirtualCamera"; }
-static NSString *fake_localizedName(id self, SEL _cmd)   { return @"vphone Virtual Camera"; }
-static NSInteger fake_position(id self, SEL _cmd)        { return 1; /* AVCaptureDevicePositionBack */ }
-static BOOL fake_hasMediaType(id self, SEL _cmd, id mt)  { return YES; }
-static BOOL fake_isConnected(id self, SEL _cmd)          { return YES; }
-static BOOL fake_lockForConfig(id self, SEL _cmd, id *e) { return YES; }
-static void fake_unlockForConfig(id self, SEL _cmd)      { }
+static NSString *fake_uniqueID(id self, SEL _cmd)     { return @"com.vphone.vcamera"; }
+static NSString *fake_modelID(id self, SEL _cmd)      { return @"VPhoneVirtualCamera"; }
+static NSString *fake_localizedName(id self, SEL _cmd) { return @"vphone Virtual Camera"; }
+static NSInteger fake_position(id self, SEL _cmd)      { return 1; /* AVCaptureDevicePositionBack */ }
+static BOOL fake_hasMediaType(id self, SEL _cmd, id mt) { return YES; }
+static BOOL fake_lockForConfig(id self, SEL _cmd, id *e) { if (e) *e = nil; return YES; }
+
+// activeFormat — the critical missing property that caused the crash
+static id fake_activeFormat(id self, SEL _cmd) { return nil; }
 
 static void RegisterFakeDeviceClass(void) {
     g_FakeDeviceClass = objc_allocateClassPair([NSObject class], "VPhoneFakeCaptureDevice", 0);
     if (!g_FakeDeviceClass) {
-        // Class may already exist (re-injection)
         g_FakeDeviceClass = NSClassFromString(@"VPhoneFakeCaptureDevice");
         return;
     }
 
+    // Identity
     class_addMethod(g_FakeDeviceClass, @selector(uniqueID), (IMP)fake_uniqueID, "@@:");
     class_addMethod(g_FakeDeviceClass, @selector(modelID), (IMP)fake_modelID, "@@:");
     class_addMethod(g_FakeDeviceClass, @selector(localizedName), (IMP)fake_localizedName, "@@:");
     class_addMethod(g_FakeDeviceClass, @selector(position), (IMP)fake_position, "q@:");
+
+    // Capabilities
     class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"hasMediaType:"), (IMP)fake_hasMediaType, "B@:@");
-    class_addMethod(g_FakeDeviceClass, @selector(isConnected), (IMP)fake_isConnected, "B@:");
+    class_addMethod(g_FakeDeviceClass, @selector(isConnected), (IMP)fake_YES, "B@:");
     class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"lockForConfiguration:"), (IMP)fake_lockForConfig, "B@:^@");
-    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"unlockForConfiguration"), (IMP)fake_unlockForConfig, "v@:");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"unlockForConfiguration"), (IMP)fake_noop, "v@:");
+
+    // Format/configuration properties — must exist to prevent unrecognized selector crashes
+    class_addMethod(g_FakeDeviceClass, @selector(activeFormat), (IMP)fake_activeFormat, "@@:");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"setActiveFormat:"), (IMP)fake_noop1, "v@:@");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"formats"), (IMP)fake_nil, "@@:");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"activeVideoMinFrameDuration"), (IMP)fake_zero, "q@:");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"activeVideoMaxFrameDuration"), (IMP)fake_zero, "q@:");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"setActiveVideoMinFrameDuration:"), (IMP)fake_noop1, "v@:@");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"setActiveVideoMaxFrameDuration:"), (IMP)fake_noop1, "v@:@");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"isFocusModeSupported:"), (IMP)fake_NO, "B@:q");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"isExposureModeSupported:"), (IMP)fake_NO, "B@:q");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"isWhiteBalanceModeSupported:"), (IMP)fake_NO, "B@:q");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"isTorchModeSupported:"), (IMP)fake_NO, "B@:q");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"hasFlash"), (IMP)fake_NO, "B@:");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"hasTorch"), (IMP)fake_NO, "B@:");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"isFlashAvailable"), (IMP)fake_NO, "B@:");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"isTorchAvailable"), (IMP)fake_NO, "B@:");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"mediaType"), (IMP)fake_nil, "@@:");
+    class_addMethod(g_FakeDeviceClass, NSSelectorFromString(@"deviceType"), (IMP)fake_nil, "@@:");
+
+    // Catch-all: forward unknown selectors to avoid crashes
+    // Use NSObject's doesNotRecognizeSelector override to log instead of crash
+    // Actually we'll use forwardInvocation approach - but simpler: just add methodSignatureForSelector
 
     objc_registerClassPair(g_FakeDeviceClass);
 }
@@ -178,9 +228,11 @@ static id GetFakeDevice(void) {
 
 static void SwizzleClassMethod(Class cls, SEL sel, IMP newIMP, IMP *origIMP) {
     Method m = class_getClassMethod(cls, sel);
-    if (!m) return;
+    if (!m) {
+        VCAM_LOG(@"SwizzleClassMethod: method not found %@ %@", cls, NSStringFromSelector(sel));
+        return;
+    }
     *origIMP = method_getImplementation(m);
-    // class methods live on the metaclass
     Class meta = object_getClass(cls);
     class_replaceMethod(meta, sel, newIMP, method_getTypeEncoding(m));
 }
@@ -188,6 +240,7 @@ static void SwizzleClassMethod(Class cls, SEL sel, IMP newIMP, IMP *origIMP) {
 static void SwizzleInstanceMethod(Class cls, SEL sel, IMP newIMP, IMP *origIMP) {
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) {
+        VCAM_LOG(@"SwizzleInstanceMethod: method not found %@ %@", cls, NSStringFromSelector(sel));
         *origIMP = NULL;
         return;
     }
@@ -201,9 +254,8 @@ static void SwizzleInstanceMethod(Class cls, SEL sel, IMP newIMP, IMP *origIMP) 
 
 static IMP orig_isSourceTypeAvailable = NULL;
 static BOOL hook_isSourceTypeAvailable(id self, SEL _cmd, NSInteger sourceType) {
-    // UIImagePickerControllerSourceTypeCamera = 1
     if (sourceType == 1) {
-        VCAM_LOG("isSourceTypeAvailable: camera -> YES");
+        VCAM_LOG(@"isSourceTypeAvailable: camera -> YES");
         return YES;
     }
     return ((BOOL(*)(id, SEL, NSInteger))orig_isSourceTypeAvailable)(self, _cmd, sourceType);
@@ -212,9 +264,8 @@ static BOOL hook_isSourceTypeAvailable(id self, SEL _cmd, NSInteger sourceType) 
 static IMP orig_setSourceType = NULL;
 static void hook_setSourceType(id self, SEL _cmd, NSInteger sourceType) {
     if (sourceType == 1) {
-        // Redirect camera to photo library
-        VCAM_LOG("setSourceType: camera -> photoLibrary");
-        sourceType = 0; // UIImagePickerControllerSourceTypePhotoLibrary
+        VCAM_LOG(@"setSourceType: camera -> photoLibrary");
+        sourceType = 0;
     }
     ((void(*)(id, SEL, NSInteger))orig_setSourceType)(self, _cmd, sourceType);
 }
@@ -225,7 +276,7 @@ static IMP orig_defaultDeviceWithMediaType = NULL;
 static id hook_defaultDeviceWithMediaType(id self, SEL _cmd, id mediaType) {
     id result = ((id(*)(id, SEL, id))orig_defaultDeviceWithMediaType)(self, _cmd, mediaType);
     if (!result) {
-        VCAM_LOG("defaultDeviceWithMediaType: returning fake device");
+        VCAM_LOG(@"defaultDeviceWithMediaType: returning fake device");
         return GetFakeDevice();
     }
     return result;
@@ -235,7 +286,7 @@ static IMP orig_devicesWithMediaType = NULL;
 static id hook_devicesWithMediaType(id self, SEL _cmd, id mediaType) {
     id result = ((id(*)(id, SEL, id))orig_devicesWithMediaType)(self, _cmd, mediaType);
     if (!result || [result count] == 0) {
-        VCAM_LOG("devicesWithMediaType: returning fake device array");
+        VCAM_LOG(@"devicesWithMediaType: returning fake device array");
         return @[GetFakeDevice()];
     }
     return result;
@@ -243,25 +294,34 @@ static id hook_devicesWithMediaType(id self, SEL _cmd, id mediaType) {
 
 #pragma mark - Hook 5: AVCaptureDeviceInput
 
+// Class method +deviceInputWithDevice:error:
 static IMP orig_deviceInputWithDevice = NULL;
 static id hook_deviceInputWithDevice(id self, SEL _cmd, id device, NSError **error) {
-    // If it's our fake device, return a dummy input (just an NSObject)
     if ([device isKindOfClass:g_FakeDeviceClass]) {
-        VCAM_LOG("deviceInputWithDevice: accepting fake device");
+        VCAM_LOG(@"+deviceInputWithDevice: accepting fake device");
         if (error) *error = nil;
-        // Return a minimal object that AVCaptureSession will accept
         return [[NSObject alloc] init];
     }
     return ((id(*)(id, SEL, id, NSError**))orig_deviceInputWithDevice)(self, _cmd, device, error);
+}
+
+// Instance method -initWithDevice:error: (this is what apps typically call)
+static IMP orig_initWithDevice = NULL;
+static id hook_initWithDevice(id self, SEL _cmd, id device, NSError **error) {
+    if ([device isKindOfClass:g_FakeDeviceClass]) {
+        VCAM_LOG(@"-initWithDevice: accepting fake device");
+        if (error) *error = nil;
+        return [[NSObject alloc] init];
+    }
+    return ((id(*)(id, SEL, id, NSError**))orig_initWithDevice)(self, _cmd, device, error);
 }
 
 #pragma mark - Hook 6: AVCaptureSession -addInput:
 
 static IMP orig_addInput = NULL;
 static void hook_addInput(id self, SEL _cmd, id input) {
-    // If it's our fake input (plain NSObject), skip the real addInput
     if (![input isKindOfClass:[AVCaptureInput class]]) {
-        VCAM_LOG("addInput: accepting fake input (skipping real addInput)");
+        VCAM_LOG(@"addInput: accepting fake input (skipping real addInput)");
         return;
     }
     ((void(*)(id, SEL, id))orig_addInput)(self, _cmd, input);
@@ -273,10 +333,9 @@ static void PushFramesToSession(AVCaptureSession *session);
 
 static IMP orig_startRunning = NULL;
 static void hook_startRunning(id self, SEL _cmd) {
-    VCAM_LOG("startRunning: starting virtual frame delivery");
+    VCAM_LOG(@"startRunning: starting virtual frame delivery");
     g_sessionRunning = YES;
 
-    // Notify observers via KVO
     [self willChangeValueForKey:@"running"];
     [self didChangeValueForKey:@"running"];
 
@@ -286,7 +345,7 @@ static void hook_startRunning(id self, SEL _cmd) {
 
 static IMP orig_stopRunning = NULL;
 static void hook_stopRunning(id self, SEL _cmd) {
-    VCAM_LOG("stopRunning: stopping virtual frame delivery");
+    VCAM_LOG(@"stopRunning: stopping virtual frame delivery");
     g_sessionRunning = NO;
 
     if (g_frameTimer) {
@@ -298,7 +357,6 @@ static void hook_stopRunning(id self, SEL _cmd) {
     [self didChangeValueForKey:@"running"];
 }
 
-// Override isRunning to return our tracked state
 static IMP orig_isRunning = NULL;
 static BOOL hook_isRunning(id self, SEL _cmd) {
     return g_sessionRunning;
@@ -307,7 +365,6 @@ static BOOL hook_isRunning(id self, SEL _cmd) {
 #pragma mark - Frame Push Logic
 
 static void PushFramesToSession(AVCaptureSession *session) {
-    // Find AVCaptureVideoDataOutput on this session
     AVCaptureVideoDataOutput *videoOutput = nil;
     for (AVCaptureOutput *output in session.outputs) {
         if ([output isKindOfClass:[AVCaptureVideoDataOutput class]]) {
@@ -317,7 +374,7 @@ static void PushFramesToSession(AVCaptureSession *session) {
     }
 
     if (!videoOutput) {
-        VCAM_LOG("no AVCaptureVideoDataOutput found on session, frame push deferred");
+        VCAM_LOG(@"no AVCaptureVideoDataOutput found on session, frame push deferred");
         return;
     }
 
@@ -325,11 +382,11 @@ static void PushFramesToSession(AVCaptureSession *session) {
     dispatch_queue_t queue = videoOutput.sampleBufferCallbackQueue;
 
     if (!delegate || !queue) {
-        VCAM_LOG("no delegate/queue on video output, frame push deferred");
+        VCAM_LOG(@"no delegate/queue on video output, frame push deferred");
         return;
     }
 
-    // Create a fake AVCaptureConnection via runtime (init is marked unavailable in headers)
+    // Create a fake AVCaptureConnection via runtime (init is unavailable in headers)
     AVCaptureConnection *connection = nil;
     @try {
         id connObj = [NSClassFromString(@"AVCaptureConnection") alloc];
@@ -363,19 +420,18 @@ static void PushFramesToSession(AVCaptureSession *session) {
         }
     });
     dispatch_resume(g_frameTimer);
-    VCAM_LOG("frame timer started at %.0f fps", kFrameRate);
+    VCAM_LOG(@"frame timer started at %.0f fps", kFrameRate);
 }
 
 #pragma mark - Hook 9: AVCapturePhotoOutput -capturePhotoWithSettings:delegate:
 
 static IMP orig_capturePhoto = NULL;
 static void hook_capturePhoto(id self, SEL _cmd, id settings, id<AVCapturePhotoCaptureDelegate> delegate) {
-    VCAM_LOG("capturePhoto: generating photo from static image");
+    VCAM_LOG(@"capturePhoto: generating photo from static image");
 
     EnsurePixelBuffer();
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // Create a JPEG representation from the pixel buffer
         CIImage *ciImage = [CIImage imageWithCVPixelBuffer:g_pixelBuffer];
         CIContext *ciCtx = [CIContext context];
         CGImageRef cgImage = [ciCtx createCGImage:ciImage fromRect:ciImage.extent];
@@ -391,19 +447,13 @@ static void hook_capturePhoto(id self, SEL _cmd, id settings, id<AVCapturePhotoC
         }
         if (cgImage) CGImageRelease(cgImage);
 
-        // Call delegate with the photo data
-        // Use AVCapturePhoto proxy if available (iOS 11+)
-        if ([delegate respondsToSelector:@selector(captureOutput:didFinishProcessingPhoto:error:)]) {
-            // We can't easily create an AVCapturePhoto, so we try the legacy path first
-            VCAM_LOG("photo capture delegate notified (data size: %lu)", (unsigned long)jpegData.length);
-        }
+        VCAM_LOG(@"photo capture complete (data size: %lu)", (unsigned long)jpegData.length);
 
         // Legacy delegate method (iOS 10)
         SEL legacySel = @selector(captureOutput:didFinishProcessingPhotoSampleBuffer:previewPhotoSampleBuffer:resolvedSettings:bracketSettings:error:);
         if ([delegate respondsToSelector:legacySel]) {
             CMSampleBufferRef sb = CreateSampleBufferFromPixelBuffer(g_pixelBuffer);
             if (sb) {
-                // resolvedSettings and bracketSettings can be nil
                 ((void(*)(id, SEL, id, CMSampleBufferRef, CMSampleBufferRef, id, id, NSError*))
                     objc_msgSend)(delegate, legacySel, self, sb, NULL, nil, nil, nil);
                 CFRelease(sb);
@@ -416,13 +466,17 @@ static void hook_capturePhoto(id self, SEL _cmd, id settings, id<AVCapturePhotoC
 
 __attribute__((constructor))
 static void VPhoneCameraInit(void) {
+    // Guard against double loading (TweakLoader may scan multiple dirs)
+    if (g_initialized) return;
+    g_initialized = YES;
+
     // Only hook in .app processes
     NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
     if (![bundlePath hasSuffix:@".app"]) {
         return;
     }
 
-    VCAM_LOG("initializing in %@", [[NSProcessInfo processInfo] processName]);
+    VCAM_LOG(@"initializing in %@", [[NSProcessInfo processInfo] processName]);
 
     // Register fake device class
     RegisterFakeDeviceClass();
@@ -453,12 +507,18 @@ static void VPhoneCameraInit(void) {
                        (IMP)hook_devicesWithMediaType,
                        &orig_devicesWithMediaType);
 
-    // Hook 5: AVCaptureDeviceInput +deviceInputWithDevice:error:
+    // Hook 5a: AVCaptureDeviceInput +deviceInputWithDevice:error:
     Class inputClass = [AVCaptureDeviceInput class];
     SwizzleClassMethod(inputClass,
                        @selector(deviceInputWithDevice:error:),
                        (IMP)hook_deviceInputWithDevice,
                        &orig_deviceInputWithDevice);
+
+    // Hook 5b: AVCaptureDeviceInput -initWithDevice:error: (apps often call this directly)
+    SwizzleInstanceMethod(inputClass,
+                          NSSelectorFromString(@"initWithDevice:error:"),
+                          (IMP)hook_initWithDevice,
+                          &orig_initWithDevice);
 
     // Hook 6: AVCaptureSession -addInput:
     Class sessionClass = [AVCaptureSession class];
@@ -479,7 +539,7 @@ static void VPhoneCameraInit(void) {
                           (IMP)hook_stopRunning,
                           &orig_stopRunning);
 
-    // Hook isRunning property
+    // Hook isRunning
     SwizzleInstanceMethod(sessionClass,
                           @selector(isRunning),
                           (IMP)hook_isRunning,
@@ -492,5 +552,5 @@ static void VPhoneCameraInit(void) {
                           (IMP)hook_capturePhoto,
                           &orig_capturePhoto);
 
-    VCAM_LOG("all hooks installed");
+    VCAM_LOG(@"all hooks installed");
 }
