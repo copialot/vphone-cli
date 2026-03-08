@@ -160,6 +160,20 @@ vphoned:
 		$(VM_DIR)/.vphoned.signed
 	@echo "  signed → $(VM_DIR)/.vphoned.signed"
 
+# Cross-compile + sign virtual camera hook dylib for iOS arm64 (requires ldid)
+.PHONY: vcamera
+vcamera:
+	@command -v ldid >/dev/null 2>&1 \
+		|| (echo "Error: ldid not found. Run: brew install ldid-procursus" && exit 1)
+	$(MAKE) -C $(SCRIPTS)/vcamera
+	@echo "=== Signing vphone_camera.dylib ==="
+	cp $(SCRIPTS)/vcamera/vphone_camera.dylib $(VM_DIR)/.vphone_camera.dylib.signed
+	ldid \
+		-S \
+		-M "-K$(SCRIPTS)/vphoned/signcert.p12" \
+		$(VM_DIR)/.vphone_camera.dylib.signed
+	@echo "  signed → $(VM_DIR)/.vphone_camera.dylib.signed"
+
 # ═══════════════════════════════════════════════════════════════════
 # VM management
 # ═══════════════════════════════════════════════════════════════════

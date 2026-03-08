@@ -127,6 +127,7 @@
 | 6   | LaunchDaemons              | bash/dropbear/trollvnc/rpcserver_ios/vphoned plists                                                                |    Y    |  Y  |  Y  |
 | 7   | Procursus bootstrap        | Bootstrap filesystem + optional Sileo deb                                                                          |    -    |  -  |  Y  |
 | 8   | BaseBin hooks              | `systemhook.dylib` / `launchdhook.dylib` / `libellekit.dylib` -> `/cores/` plus `/b` alias for `launchdhook.dylib` |    -    |  -  |  Y  |
+| 9   | Virtual camera hook        | `vphone_camera.dylib` -> `/Library/MobileSubstrate/DynamicLibraries/` (static image as camera input)               |    -    |  -  |  Y  |
 
 ### CFW Installer Flow Matrix (Script-Level)
 
@@ -140,6 +141,7 @@
 
 | Procursus bootstrap deployment | - | - | Y (JB-2) |
 | BaseBin hook deployment (`*.dylib` -> `/mnt1/cores`) | - | - | Y (JB-3) |
+| Virtual camera hook deployment (`vphone_camera.dylib` -> `/mnt1/Library/MobileSubstrate/DynamicLibraries/`) | - | - | Y (JB-4.5) |
 | Additional input resources | `cfw_input` | `cfw_input` + `resources/cfw_dev/rpcserver_ios` | `cfw_input` + `cfw_jb_input` |
 | Extra tool requirement beyond base | - | - | `zstd` |
 | Halt behavior | Halts unless `CFW_SKIP_HALT=1` | Halts unless `CFW_SKIP_HALT=1` | Always halts after JB phases |

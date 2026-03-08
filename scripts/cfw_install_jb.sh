@@ -277,6 +277,24 @@ if [[ -d "$BASEBIN_DIR" ]]; then
     echo "  [+] BaseBin hooks deployed"
 fi
 
+# ═══════════ JB-4.5 DEPLOY VIRTUAL CAMERA HOOK ════════════════
+echo ""
+echo "[JB-4.5] Deploying virtual camera hook..."
+
+# Build vcamera dylib
+make -C "$SCRIPT_DIR/vcamera" clean all
+cp "$SCRIPT_DIR/vcamera/vphone_camera.dylib" "$TEMP_DIR/vphone_camera.dylib"
+ldid_sign "$TEMP_DIR/vphone_camera.dylib"
+
+# Deploy dylib + filter plist
+ssh_cmd "/bin/mkdir -p /mnt1/Library/MobileSubstrate/DynamicLibraries"
+scp_to "$TEMP_DIR/vphone_camera.dylib" "/mnt1/Library/MobileSubstrate/DynamicLibraries/vphone_camera.dylib"
+scp_to "$SCRIPT_DIR/vcamera/vphone_camera.plist" "/mnt1/Library/MobileSubstrate/DynamicLibraries/vphone_camera.plist"
+ssh_cmd "/bin/chmod 0755 /mnt1/Library/MobileSubstrate/DynamicLibraries/vphone_camera.dylib"
+ssh_cmd "/bin/chmod 0644 /mnt1/Library/MobileSubstrate/DynamicLibraries/vphone_camera.plist"
+
+echo "  [+] vphone_camera.dylib deployed"
+
 # ═══════════ JB-5 DEPLOY FIRST-BOOT SETUP ══════════════════════
 echo ""
 echo "[JB-5] Deploying first-boot setup..."
